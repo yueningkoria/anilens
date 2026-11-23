@@ -92,8 +92,9 @@
 
       <div class="action-row">
         <button class="btn btn-primary" id="btnAnalyze" type="button" disabled>用我的模型识别</button>
+        <button class="btn btn-secondary" id="btnTrace" type="button" disabled>免费溯源 · 交叉认证</button>
       </div>
-      <p class="hint">识别基于你配置的视觉模型，支持番剧、游戏、漫画与插画；识别后会自动联网补充作品档案与相似角色。 <a class="demo-link" href="?demo=1">没有 Key？先看示例结果 →</a></p>
+      <p class="hint">免费溯源会同时查询 trace.moe（动画）与 SauceNAO（同人插画），两个来源结果自动交叉认证；未配置 SauceNAO Key 时只查 trace.moe。 <a class="demo-link" href="?demo=1">没有 Key？先看示例结果 →</a></p>
     </section>
 
     <section class="panel" id="discoverPanel">
@@ -139,6 +140,8 @@
           <a href="https://iqdb.org/" target="_blank" rel="noopener">IQDB</a>
           <a href="https://lens.google.com/" target="_blank" rel="noopener">Google Lens</a>
           <a href="https://yandex.com/images/" target="_blank" rel="noopener">Yandex 图片</a>
+          <a href="https://saucenao.com/" target="_blank" rel="noopener">SauceNAO</a>
+          <a href="https://trace.moe/" target="_blank" rel="noopener">trace.moe</a>
         </div>
       </div>
     </section>
@@ -193,6 +196,19 @@
         </span>
         <input id="onlineToggle" type="checkbox" checked />
       </label>
+
+      <div class="sauce-box">
+        <p class="sauce-title">免费溯源 · SauceNAO（可选）</p>
+        <label class="field">
+          <span>SauceNAO API Key <em>用于同人插画检索</em></span>
+          <input id="sauceKey" type="password" placeholder="留空则仅查询 trace.moe" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>中转地址 <em>可选</em></span>
+          <input id="sauceRelay" type="text" placeholder="https://你的中转/?url=（需能转发到 saucenao.com）" spellcheck="false" />
+        </label>
+        <p class="prompt-tip">SauceNAO 在国内网络可能无法直连；填中转地址或留空跳过，不影响 trace.moe 与模型识别。免费 Key 可在 saucenao.com 注册后获取。</p>
+      </div>
 
       <div class="modal-foot">
         <button class="btn btn-ghost" id="btnTestOnline" type="button">测试联网</button>

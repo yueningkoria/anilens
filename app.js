@@ -146,7 +146,9 @@ function currentConfig() {
     baseUrl: (cfg.baseUrl || '').trim(),
     model: (cfg.model || '').trim(),
     apiKey: (cfg.apiKey || '').trim(),
-    online: cfg.online !== false
+    online: cfg.online !== false,
+    sauceKey: (cfg.sauceKey || '').trim(),
+    sauceRelay: (cfg.sauceRelay || '').trim()
   };
 }
 
@@ -182,6 +184,8 @@ function openSettings() {
   $('modelName').value = cfg.model || PRESETS.siliconflow.model;
   $('apiKey').value = cfg.apiKey || '';
   $('onlineToggle').checked = cfg.online !== false;
+  $('sauceKey').value = cfg.sauceKey || '';
+  $('sauceRelay').value = cfg.sauceRelay || '';
   $('testResult').textContent = '';
   $('testResult').className = 'modal-note';
   $('settingsModal').hidden = false;
@@ -197,7 +201,9 @@ function collectSettings() {
     baseUrl: $('baseUrl').value.trim(),
     model: $('modelName').value.trim(),
     apiKey: $('apiKey').value.trim(),
-    online: $('onlineToggle').checked
+    online: $('onlineToggle').checked,
+    sauceKey: $('sauceKey').value.trim(),
+    sauceRelay: $('sauceRelay').value.trim()
   };
 }
 
@@ -311,6 +317,7 @@ async function applyImage(blob, label) {
     state.meta = (label ? label + ' · ' : '') + big.width + '×' + big.height + ' · ' + formatBytes(blob.size || 0);
     renderPreview();
     $('btnAnalyze').disabled = false;
+    $('btnTrace').disabled = false;
   } catch (err) {
     toast('图片读取失败，请换一张试试');
   }
@@ -321,6 +328,7 @@ function renderPreview() {
     $('dzEmpty').hidden = false;
     $('dzPreview').hidden = true;
     $('btnAnalyze').disabled = true;
+    $('btnTrace').disabled = true;
     return;
   }
   $('previewImg').src = state.dataUrl;
@@ -374,9 +382,12 @@ function setBusy(busy, text) {
   if (text) $('statusText').textContent = text;
   const hasImage = Boolean(state.dataUrl);
   $('btnAnalyze').disabled = busy || !hasImage;
+  $('btnTrace').disabled = busy || !hasImage;
   $('btnUrl').disabled = busy;
   $('btnAnalyze').classList.toggle('is-loading', busy);
+  $('btnTrace').classList.toggle('is-loading', busy);
   $('btnAnalyze').textContent = busy ? '识别中…' : '用我的模型识别';
+  $('btnTrace').textContent = busy ? '检索中…' : '免费溯源 · 交叉认证';
 }
 
 /* ---------------- 模型识别 ---------------- */
@@ -2289,6 +2300,531 @@ function showResults() {
   $('resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+/* ---------------- 免费溯源：trace.moe + SauceNAO 交叉认证 ---------------- */
+
+const TRACE_CACHE_KEY = 'anilens.tracecache.v2';
+const TRACE_TTL = 12 * 60 * 60 * 1000;
+/* 相似度为 0–100。低于门槛通常是无关图片的“假命中”，必须丢弃 */
+const TRACE_MIN_SIM = 75;
+const TRACE_GOOD_SIM = 87;
+const TRACE_SURE_SIM = 93;
+const TRACE_TIMEOUT_MS = 20000;
+const SAUCE_MIN_SIM = 62;
+const SAUCE_TIMEOUT_MS = 12000;
+
+function formatTime(seconds) {
+  if (typeof seconds !== 'number' || isNaN(seconds)) return '';
+  const total = Math.max(0, Math.round(seconds));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+function dataUrlToBlob(dataUrl) {
+  const parts = String(dataUrl).split(',');
+  const mime = (parts[0].match(/data:([^;]+)/) || [])[1] || 'image/jpeg';
+  const binary = atob(parts[1] || '');
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+/* 纯色/极低信息量图片会让 trace.moe 返回 99% 的假命中，先做本地检测 */
+function imageInformativeness(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = 64;
+        const h = Math.max(1, Math.round((img.height / img.width) * w)) || w;
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        const lum = new Float32Array(w * h);
+        let sum = 0;
+        let sum2 = 0;
+        for (let i = 0; i < w * h; i += 1) {
+          const l = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+          lum[i] = l;
+          sum += l;
+          sum2 += l * l;
+        }
+        const mean = sum / (w * h);
+        const variance = Math.max(0, sum2 / (w * h) - mean * mean);
+        let edge = 0;
+        for (let y = 0; y < h; y += 1) {
+          for (let x = 1; x < w; x += 1) edge += Math.abs(lum[y * w + x] - lum[y * w + x - 1]);
+        }
+        resolve({ variance, edge: edge / (h * (w - 1)) });
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+function hashImage(dataUrl) {
+  let hash = 2166136261;
+  const step = Math.max(1, Math.floor(dataUrl.length / 4096));
+  for (let i = 0; i < dataUrl.length; i += step) {
+    hash ^= dataUrl.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36) + '_' + dataUrl.length;
+}
+
+function readTraceCache(key) {
+  try {
+    const map = JSON.parse(localStorage.getItem(TRACE_CACHE_KEY) || '{}') || {};
+    const hit = map[key];
+    if (hit && Date.now() - hit.ts < TRACE_TTL && Array.isArray(hit.items) && hit.items.length) {
+      return hit.items;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function writeTraceCache(key, items) {
+  try {
+    const map = JSON.parse(localStorage.getItem(TRACE_CACHE_KEY) || '{}') || {};
+    map[key] = { ts: Date.now(), items };
+    const trimmed = {};
+    Object.keys(map)
+      .sort((a, b) => map[b].ts - map[a].ts)
+      .slice(0, 10)
+      .forEach((k) => { trimmed[k] = map[k]; });
+    localStorage.setItem(TRACE_CACHE_KEY, JSON.stringify(trimmed));
+  } catch (e) {}
+}
+
+function traceRequest(blob, cutBorders) {
+  const url = 'https://api.trace.moe/search?anilistInfo' + (cutBorders ? '&cutBorders' : '');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TRACE_TIMEOUT_MS);
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': blob.type || 'image/jpeg' },
+    body: blob,
+    signal: controller.signal
+  }).finally(() => clearTimeout(timer));
+}
+
+function traceItems(data) {
+  return ((data && data.result) || []).map((r) => {
+    const title = (r.anilist && r.anilist.title) || {};
+    const primary = title.chinese || title.native || title.romaji || title.english || r.filename || '未知作品';
+    const altParts = [title.chinese, title.native, title.romaji, title.english]
+      .filter(Boolean)
+      .filter((t) => t !== primary);
+    return {
+      title: primary,
+      alt: altParts.slice(0, 2).join(' / '),
+      similarity: Math.round((r.similarity || 0) * 100),
+      episode: r.episode != null ? r.episode : '',
+      at: formatTime(r.from),
+      to: formatTime(r.to),
+      episodes: r.anilist && r.anilist.episodes ? r.anilist.episodes : '',
+      image: r.image || '',
+      video: r.video || '',
+      anilistId: r.anilist && r.anilist.id ? r.anilist.id : '',
+      isAdult: Boolean(r.anilist && r.anilist.isAdult)
+    };
+  }).sort((a, b) => b.similarity - a.similarity);
+}
+
+/* 按可信度与内容安全过滤；同一作品同一集只保留最高相似度的一条 */
+function tracePick(items) {
+  const seen = new Set();
+  const out = [];
+  (items || []).forEach((it) => {
+    if (it.isAdult) return;
+    if (it.similarity < TRACE_MIN_SIM) return;
+    const key = (it.anilistId || it.title) + '|' + (it.episode === '' ? 'mov' : it.episode);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(it);
+  });
+  return out.slice(0, 6);
+}
+
+function traceQuota(data) {
+  if (!data) return null;
+  const limit = Number(data.quota);
+  const used = Number(data.quotaUsed);
+  if (!limit || isNaN(used)) return null;
+  return { limit, used };
+}
+
+function traceAligned(item, modelTitle) {
+  const target = normalizeTitle(modelTitle);
+  if (!target) return false;
+  const pool = normalizeTitle((item.title || '') + (item.alt || ''));
+  const own = normalizeTitle(item.title);
+  return pool.indexOf(target) !== -1 || (own && target.indexOf(own) !== -1);
+}
+
+async function runTrace(blob, cacheKey) {
+  const cachedRaw = readTraceCache(cacheKey);
+  if (cachedRaw) {
+    const picked = tracePick(cachedRaw);
+    if (picked.length) {
+      return { ok: true, items: picked, cached: true, rejected: Math.max(0, cachedRaw.length - picked.length) };
+    }
+  }
+  let res;
+  try {
+    res = await traceRequest(blob, true);
+  } catch (err) {
+    return { ok: false, title: '免费溯源超时', error: 'trace.moe 响应过慢或暂时不可达，请稍后重试。' };
+  }
+  if (res.status === 429) {
+    return { ok: false, title: '免费额度暂时用完', error: 'trace.moe 每个网络每天有免费次数限制，请稍后再试。' };
+  }
+  if (!res.ok) {
+    return { ok: false, title: '免费溯源失败', error: 'trace.moe 返回 HTTP ' + res.status + '。' };
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch (err) {
+    return { ok: false, title: '免费溯源失败', error: 'trace.moe 返回内容无法解析。' };
+  }
+  if (data && data.error) {
+    return { ok: false, title: '免费溯源失败', error: String(data.error) };
+  }
+  const all = traceItems(data);
+  let items = tracePick(all);
+  let rejected = Math.max(0, all.length - items.length);
+  let fallback = false;
+  const best = items.length ? items[0].similarity : 0;
+  /* 裁边模式没有可靠命中时，改用整图再试一次 */
+  if (!items.length || best < TRACE_GOOD_SIM) {
+    try {
+      const retry = await traceRequest(blob, false);
+      if (retry.ok) {
+        const retryData = await retry.json();
+        if (retryData && !retryData.error) {
+          const retryItems = tracePick(traceItems(retryData));
+          if (retryItems.length && (!items.length || retryItems[0].similarity > best)) {
+            items = retryItems;
+            fallback = true;
+            rejected = 0;
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  if (items.length) writeTraceCache(cacheKey, items);
+  return { ok: true, items, rejected, fallback, quota: traceQuota(data) };
+}
+
+async function sauceSearch(cfg, blob) {
+  const base = 'https://saucenao.com/search.php';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SAUCE_TIMEOUT_MS);
+  try {
+    let res;
+    if (cfg.sauceRelay) {
+      if (!state.imageUrl) return { skipped: 'SauceNAO 中转模式需要图片直链，本次已跳过' };
+      const api = base + '?output_type=2&numres=6&api_key=' + encodeURIComponent(cfg.sauceKey) +
+        '&url=' + encodeURIComponent(state.imageUrl);
+      res = await fetch(cfg.sauceRelay + encodeURIComponent(api), { signal: controller.signal });
+    } else {
+      const fd = new FormData();
+      fd.append('file', blob, 'image.jpg');
+      fd.append('output_type', '2');
+      fd.append('numres', '6');
+      fd.append('api_key', cfg.sauceKey);
+      res = await fetch(base, { method: 'POST', body: fd, signal: controller.signal });
+    }
+    if (!res.ok) return { error: 'HTTP ' + res.status };
+    const data = await res.json();
+    if (data && data.header && Number(data.header.status) < 0) {
+      return { error: data.header.message || ('状态 ' + data.header.status) };
+    }
+    return { items: sauceItems(data) };
+  } catch (err) {
+    return { error: err && err.name === 'AbortError' ? '请求超时' : '网络不可达或被跨域拦截' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sauceItems(data) {
+  return ((data && data.results) || []).map((r) => {
+    const h = r.header || {};
+    const d = r.data || {};
+    const urls = Array.isArray(d.ext_urls) ? d.ext_urls.filter(Boolean) : [];
+    const index = String(h.index_name || '');
+    return {
+      title: String(d.title || d.jp_title || d.source || '未命名作品'),
+      author: String(d.author_name || d.member_name || ''),
+      similarity: Math.round(parseFloat(h.similarity) || 0),
+      thumb: h.thumbnail || '',
+      url: urls[0] || '',
+      index,
+      isAdult: /h-anime|h-manga|e-hentai|nhentai|fakku|lolicon/i.test(index)
+    };
+  }).filter((it) => it.similarity >= SAUCE_MIN_SIM && !it.isAdult)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, 6);
+}
+
+function crossCheck(trace, sauce, modelTitle) {
+  const best = trace[0];
+  const signals = [];
+  if (!best) {
+    if (sauce.length) {
+      signals.push('SauceNAO 命中 ' + sauce.length + ' 条同人插画');
+      return {
+        level: 'mid', label: '插画命中', signals, modelMatch: false,
+        text: 'trace.moe 没有收录这张动画画面，但 SauceNAO 找到了相似插画，可结合来源链接确认。'
+      };
+    }
+    return {
+      level: 'none', label: '未命中', signals,
+      text: 'trace.moe 与 SauceNAO 都没有返回可靠结果。游戏、漫画、剧场版或经过裁切的截图，建议用「用我的模型识别」。'
+    };
+  }
+
+  const targetKey = best.anilistId || normalizeTitle(best.title);
+  let multi = 0;
+  trace.forEach((it) => {
+    if ((it.anilistId || normalizeTitle(it.title)) === targetKey) multi += 1;
+  });
+  if (multi >= 2) signals.push('同作品 ' + multi + ' 条结果互相印证');
+
+  const modelMatch = traceAligned(best, modelTitle);
+  if (modelMatch) signals.push('与模型结果一致');
+
+  let sauceMatch = false;
+  if (sauce.length) {
+    const a = normalizeTitle(best.title);
+    const b = normalizeTitle(best.alt);
+    sauceMatch = sauce.some((s) => {
+      const t = normalizeTitle(s.title);
+      if (!t) return false;
+      return (a && (t.indexOf(a) !== -1 || a.indexOf(t) !== -1)) ||
+        (b && (t.indexOf(b) !== -1 || b.indexOf(t) !== -1));
+    });
+    if (sauceMatch) signals.push('SauceNAO 指向同一作品');
+  }
+
+  /* 结果分散在多部作品且都逼近 100%，通常说明图片信息不足，属假命中 */
+  const strongWorks = new Set();
+  trace.forEach((it) => {
+    if (it.similarity >= 98) strongWorks.add(it.anilistId || normalizeTitle(it.title));
+  });
+  if (strongWorks.size >= 3) {
+    return {
+      level: 'low',
+      label: '存疑',
+      signals,
+      modelMatch,
+      sauceMatch,
+      text: '结果分散在 ' + strongWorks.size + ' 部不同作品，且相似度都接近 100%，通常是图片信息不足造成的假命中，可信度低。'
+    };
+  }
+
+  let level;
+  let label;
+  let text;
+  if (best.similarity >= TRACE_SURE_SIM || sauceMatch || (modelMatch && best.similarity >= TRACE_GOOD_SIM)) {
+    level = 'high';
+    label = '高可信';
+    text = '多个来源或信号指向同一作品，结论可信度较高。';
+  } else if (best.similarity >= TRACE_GOOD_SIM || multi >= 2) {
+    level = 'mid';
+    label = '较可信';
+    text = '只有单一强信号，建议结合下方以图搜图再确认一次。';
+  } else {
+    level = 'low';
+    label = '存疑';
+    text = '最佳相似度仅 ' + best.similarity + '%，画面可能被裁切、加了滤镜或并非电视动画，结论仅供参考。';
+  }
+  return { level, label, text, signals, modelMatch, sauceMatch };
+}
+
+function renderFreeResult(payload) {
+  const trace = payload.trace || [];
+  const sauce = payload.sauce || [];
+  const cross = payload.cross || { level: 'none', label: '未命中', text: '', signals: [] };
+  const meta = payload.meta || {};
+  const modelTitle = payload.modelTitle || '';
+  const badgeCls = cross.level === 'high' ? 'badge-on' : cross.level === 'mid' ? 'badge-info' : 'badge-warn';
+
+  $('resultSource').textContent = sauce.length ? '免费溯源 · 双源交叉' : 'trace.moe · 免费溯源';
+  $('resultSource').className = 'badge ' + badgeCls;
+
+  let html = '<div class="cross-box cross-' + esc(cross.level) + '">' +
+    '<div class="cross-head"><b>交叉认证</b><span class="badge ' + badgeCls + '">' + esc(cross.label) + '</span></div>' +
+    '<p>' + esc(cross.text) + '</p>' +
+    ((cross.signals || []).length
+      ? '<div class="cross-signals">' + cross.signals.map((s) => '<span>' + esc(s) + '</span>').join('') + '</div>'
+      : '') +
+    '</div>';
+
+  const chipsOf = (item, isBest) => {
+    const chips = [];
+    chips.push((isBest ? '最佳匹配 ' : '') + item.similarity + '% 相似');
+    if (item.episode) chips.push('第 ' + item.episode + ' 话');
+    if (item.at) chips.push('时间 ' + item.at + (item.to ? '–' + item.to : ''));
+    if (item.episodes) chips.push('全 ' + item.episodes + ' 集');
+    let out = '<div class="trace-meta">' + chips.map((c) => '<span>' + esc(c) + '</span>').join('');
+    if (isBest && cross.modelMatch) out += '<span class="trace-hit">与模型结果一致</span>';
+    return out + '</div>';
+  };
+
+  const linksOf = (item) => {
+    const parts = [];
+    if (item.anilistId) {
+      parts.push('<a href="https://anilist.co/anime/' + encodeURIComponent(item.anilistId) + '" target="_blank" rel="noopener">AniList 条目</a>');
+    }
+    if (item.video) parts.push('<a href="' + esc(item.video) + '" target="_blank" rel="noopener">播放相似片段</a>');
+    parts.push('<a href="https://bgm.tv/subject_search/' + encodeURIComponent(item.title) + '" target="_blank" rel="noopener">Bangumi 搜索</a>');
+    return '<div class="trace-links">' + parts.join('') + '</div>';
+  };
+
+  if (trace.length) {
+    const best = trace[0];
+    const rest = trace.slice(1);
+    html += '<p class="block-label">trace.moe · 动画</p>';
+    html += '<div class="trace-hero">' +
+      (best.image ? '<div class="trace-hero-thumb"><img src="' + esc(best.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" /></div>' : '') +
+      '<div class="trace-hero-body">' +
+      '<span class="trace-kicker">最佳匹配 · ' + esc(cross.label) + '</span>' +
+      '<h2>' + esc(best.title) + '</h2>' +
+      (best.alt ? '<p class="trace-sub">' + esc(best.alt) + '</p>' : '') +
+      chipsOf(best, true) + linksOf(best) +
+      '</div></div>';
+    if (rest.length) {
+      html += '<p class="trace-more">其他候选</p><div class="trace-list">' + rest.map((item) =>
+        '<div class="trace-item">' +
+        '<div class="trace-thumb">' + (item.image ? '<img src="' + esc(item.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" />' : '') + '</div>' +
+        '<div class="trace-body"><h3>' + esc(item.title) + '</h3>' +
+        (item.alt ? '<p class="trace-sub">' + esc(item.alt) + '</p>' : '') +
+        chipsOf(item, false) + linksOf(item) +
+        '</div></div>'
+      ).join('') + '</div>';
+    }
+  }
+
+  if (sauce.length) {
+    html += '<p class="block-label">SauceNAO · 同人插画</p><div class="sauce-grid">' + sauce.map((item) => {
+      const inner = '<div class="sauce-thumb">' +
+        (item.thumb ? '<img src="' + esc(item.thumb) + '" alt="" loading="lazy" referrerpolicy="no-referrer" />' : '') +
+        '</div><div class="sauce-body"><strong>' + esc(item.title) + '</strong>' +
+        '<span>' + (item.author ? esc(item.author) + ' · ' : '') + item.similarity + '% 相似</span>' +
+        (item.index ? '<em>' + esc(item.index) + '</em>' : '') +
+        '</div>';
+      return item.url
+        ? '<a class="sauce-card" href="' + esc(item.url) + '" target="_blank" rel="noopener">' + inner + '</a>'
+        : '<div class="sauce-card">' + inner + '</div>';
+    }).join('') + '</div>';
+  } else if (payload.sauceNote) {
+    html += '<p class="sauce-skip">' + esc(payload.sauceNote) + '</p>';
+  }
+
+  if (!trace.length && !sauce.length) {
+    html += '<div class="empty-state"><strong>没有可靠命中</strong><p>' + esc(cross.text) + '</p></div>';
+  }
+
+  const notes = [];
+  if (meta.cached) notes.push('命中本地缓存，12 小时内不重复消耗额度');
+  if (meta.fallback) notes.push('裁边模式无可靠命中，已自动改用整图重试');
+  if (meta.rejected) notes.push('已过滤 ' + meta.rejected + ' 条低可信或不适内容结果');
+  if (meta.lowDetail) notes.push('图片信息量过低，已跳过 trace.moe 以避免假命中');
+  if (meta.quota) notes.push('今日 trace.moe 免费额度已用 ' + meta.quota.used + '/' + meta.quota.limit);
+  if (meta.traceError) notes.push('trace.moe：' + meta.traceError);
+  if (notes.length) html += '<p class="trace-note">' + esc(notes.join(' · ')) + '</p>';
+  html += reverseSearchHtml();
+
+  state.payload = payload;
+  const lines = [];
+  if (trace.length) {
+    lines.push('trace.moe：' + trace[0].title +
+      (trace[0].episode ? ' 第' + trace[0].episode + '话' : '') +
+      ' · ' + trace[0].similarity + '%');
+  }
+  if (sauce.length) {
+    lines.push('SauceNAO：' + sauce[0].title + ' · ' + sauce[0].similarity + '%');
+  }
+  state.lastText = '【免费溯源 · 交叉认证：' + cross.label + '】\n' + lines.join('\n');
+  $('resultBody').innerHTML = html;
+  showResults();
+}
+
+async function handleFree() {
+  if (!state.dataUrl || state.busy) return;
+  const cfg = currentConfig();
+  const modelTitle = state.payload && state.payload.kind === 'model'
+    ? (state.payload.data.title_cn || state.payload.data.title_original || '')
+    : '';
+  setBusy(true, '正在检索 trace.moe 与 SauceNAO…');
+  $('resultsPanel').hidden = true;
+  try {
+    const blob = dataUrlToBlob(state.dataUrl);
+    const info = await imageInformativeness(state.dataUrl);
+    const lowDetail = Boolean(info && info.variance < 40 && info.edge < 0.6);
+    const saucePromise = cfg.sauceKey
+      ? sauceSearch(cfg, blob)
+      : Promise.resolve({ skipped: '未配置 SauceNAO API Key，本次仅查询 trace.moe' });
+    const tracePromise = lowDetail
+      ? Promise.resolve({ ok: true, items: [], lowDetail: true })
+      : runTrace(blob, hashImage(state.dataUrl));
+    const results = await Promise.all([tracePromise, saucePromise]);
+    const traceRes = results[0];
+    const sauceRes = results[1];
+    const sauce = sauceRes.items || [];
+    let sauceNote = '';
+    if (sauceRes.skipped) sauceNote = sauceRes.skipped;
+    else if (sauceRes.error) sauceNote = 'SauceNAO 跳过：' + sauceRes.error;
+    else if (!sauce.length) sauceNote = 'SauceNAO 没有相似度足够的同人插画';
+
+    if (!traceRes.ok && !sauce.length) {
+      showError(traceRes.title || '免费溯源失败', traceRes.error || '两个来源都没有返回结果。', 'free');
+      return;
+    }
+
+    const payload = {
+      kind: 'free',
+      trace: traceRes.ok ? traceRes.items : [],
+      sauce,
+      sauceNote,
+      modelTitle,
+      cross: lowDetail
+        ? {
+          level: 'none',
+          label: '无法比对',
+          signals: [],
+          modelMatch: false,
+          text: '这张图片接近纯色或信息量极低，trace.moe 会给出虚假的高相似度，已阻止查询。请上传真实截图。'
+        }
+        : crossCheck(traceRes.ok ? traceRes.items : [], sauce, modelTitle),
+      meta: {
+        cached: Boolean(traceRes.cached),
+        fallback: Boolean(traceRes.fallback),
+        quota: traceRes.quota || null,
+        rejected: traceRes.rejected || 0,
+        lowDetail,
+        traceError: traceRes.ok ? '' : (traceRes.error || '')
+      }
+    };
+    renderFreeResult(payload);
+    const head = (payload.trace[0] && payload.trace[0].title) || (sauce[0] && sauce[0].title);
+    if (head) {
+      addHistory({ title: head, subtitle: '交叉认证 · ' + payload.cross.label, payload });
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
 /* ---------------- 历史记录 ---------------- */
 
 function readHistory() {
@@ -2355,6 +2891,8 @@ function restoreHistory(index) {
   }
   if (item.payload.kind === 'model') {
     renderModelResult(item.payload.data, item.payload.model, item.payload.thinking);
+  } else if (item.payload.kind === 'free') {
+    renderFreeResult(item.payload);
   }
 }
 
@@ -2432,6 +2970,7 @@ function bindEvents() {
   });
 
   $('btnAnalyze').addEventListener('click', handleAnalyze);
+  $('btnTrace').addEventListener('click', handleFree);
 
   $('btnRefreshDiscover').addEventListener('click', loadDiscover);
   $('discoverTabs').addEventListener('click', (e) => {
@@ -2489,6 +3028,8 @@ function bindEvents() {
     const action = trigger.dataset.action;
     if (action === 'retry' || action === 'analyze') {
       handleAnalyze();
+    } else if (action === 'free') {
+      handleFree();
     } else if (action === 'online-retry' && state.payload && state.payload.data) {
       enhanceOnline(state.payload.data);
     }

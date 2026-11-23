@@ -9,6 +9,7 @@
 
 - **截图识别**：拖拽 / 点击上传、Ctrl + V 粘贴、粘贴图片直链
 - **视觉模型识别**：支持任意 OpenAI 兼容的视觉模型（OpenAI / 硅基流动 / DeepSeek / 通义千问 / 智谱 / Gemini）
+- **免费溯源 · 交叉认证**：trace.moe 动画溯源 + SauceNAO 同人插画（可选 API Key），多信号自动交叉验证并标注可信度，纯色/低信息图片会被本地拦截以防假命中
 - **联网增强**：自动补全 AniList 封面、评分、简介、相似角色与相似作品，并翻译为中文
 - **Galgame 识别**：多路召回 + 打分，联动 [VNDB](https://vndb.org/) 展示作品档案与官方截图
 - **发现最新**：本季新番 / 最新新话 / 新游上线，标题自动中文化，按时间动态刷新
@@ -17,7 +18,7 @@
 ## 技术说明
 
 - 纯 `HTML + CSS + 原生 JavaScript`，无框架、无打包、无依赖
-- 数据源（均为公开 CORS 接口）：AniList GraphQL、VNDB Kana API、Steam、FreeToGame、MyMemory 翻译
+- 数据源（均为公开 CORS 接口）：AniList GraphQL、VNDB Kana API、trace.moe、SauceNAO、Steam、FreeToGame、MyMemory 翻译
 - 配置持久化于 `localStorage`
 
 
@@ -25,7 +26,7 @@
 
 - 上传的图片不会上传到本站服务器（本站没有服务器），仅在浏览器内处理
 - 视觉模型的 API Key 保存在浏览器 `localStorage`，不会发送给本 Demo 以外的任何地方
-- 识别时图片会直接发送到你配置的模型服务商
+- 识别时图片会直接发送到你配置的模型服务商；使用免费溯源时，图片会发送给 trace.moe，配置了 SauceNAO Key 时还会发送给 SauceNAO
 
 ## 免责声明
 
