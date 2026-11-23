@@ -5,14 +5,6 @@ const CFG_KEY = 'anilens.config.v1';
 const HIS_KEY = 'anilens.history.v1';
 const PROMPT_KEY = 'anilens.prompt.v1';
 const HINT_KEY = 'anilens.hint.v1';
-const TRACE_CACHE_KEY = 'anilens.tracecache.v1';
-const TRACE_TTL = 12 * 60 * 60 * 1000;
-/* trace.moe 相似度（0–100）。低于门槛通常是无关图片的“假命中”，必须丢弃 */
-const TRACE_MIN_SIM = 75;
-const TRACE_GOOD_SIM = 87;
-const TRACE_SURE_SIM = 93;
-const TRACE_ALLOW_ADULT = false;
-const TRACE_TIMEOUT_MS = 45000;
 const MAX_HISTORY = 6;
 
 const PRESETS = {
@@ -91,14 +83,6 @@ function formatBytes(n) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
   return (n / 1024 / 1024).toFixed(1) + ' MB';
-}
-
-function formatTime(seconds) {
-  if (typeof seconds !== 'number' || isNaN(seconds)) return '';
-  const total = Math.max(0, Math.round(seconds));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
 }
 
 function joinUrl(base, path) {
@@ -318,15 +302,6 @@ async function drawToDataUrl(blob, maxSide, quality) {
   }
 }
 
-function dataUrlToBlob(dataUrl) {
-  const parts = String(dataUrl).split(',');
-  const mime = (parts[0].match(/data:([^;]+)/) || [])[1] || 'image/jpeg';
-  const binary = atob(parts[1] || '');
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return new Blob([bytes], { type: mime });
-}
-
 async function applyImage(blob, label) {
   try {
     const big = await drawToDataUrl(blob, 1280, 0.85);
@@ -336,7 +311,6 @@ async function applyImage(blob, label) {
     state.meta = (label ? label + ' · ' : '') + big.width + '×' + big.height + ' · ' + formatBytes(blob.size || 0);
     renderPreview();
     $('btnAnalyze').disabled = false;
-    $('btnTrace').disabled = false;
   } catch (err) {
     toast('图片读取失败，请换一张试试');
   }
@@ -347,7 +321,6 @@ function renderPreview() {
     $('dzEmpty').hidden = false;
     $('dzPreview').hidden = true;
     $('btnAnalyze').disabled = true;
-    $('btnTrace').disabled = true;
     return;
   }
   $('previewImg').src = state.dataUrl;
@@ -401,12 +374,9 @@ function setBusy(busy, text) {
   if (text) $('statusText').textContent = text;
   const hasImage = Boolean(state.dataUrl);
   $('btnAnalyze').disabled = busy || !hasImage;
-  $('btnTrace').disabled = busy || !hasImage;
   $('btnUrl').disabled = busy;
   $('btnAnalyze').classList.toggle('is-loading', busy);
-  $('btnTrace').classList.toggle('is-loading', busy);
   $('btnAnalyze').textContent = busy ? '识别中…' : '用我的模型识别';
-  $('btnTrace').textContent = busy ? '处理中…' : '免费动画溯源';
 }
 
 /* ---------------- 模型识别 ---------------- */
@@ -2304,106 +2274,6 @@ function characterMatches(term, hit) {
   });
 }
 
-function traceAligned(item, modelTitle) {
-  const target = normalizeTitle(modelTitle);
-  if (!target) return false;
-  const pool = normalizeTitle((item.title || '') + (item.alt || ''));
-  const own = normalizeTitle(item.title);
-  return pool.indexOf(target) !== -1 || (own && target.indexOf(own) !== -1);
-}
-
-function renderTraceResult(items, meta) {
-  meta = meta || {};
-  if (!items.length) {
-    const rejected = Number(meta.rejected) || 0;
-    const reason = rejected
-      ? '本次共检索到 ' + rejected + ' 条结果，但相似度都低于可信门槛（' + TRACE_MIN_SIM + '%）或属于不适内容，已自动过滤，避免给出错误答案。'
-      : 'trace.moe 只收录电视动画画面。若截图来自 Galgame / 视觉小说、游戏、漫画、剧场版，或经过裁切、滤镜、翻拍，建议用「用我的模型识别」，模型结果会自动联动 VNDB 与 AniList 查询角色；也可使用下方以图搜图交叉验证。';
-    $('resultSource').textContent = 'trace.moe';
-    $('resultSource').className = 'badge badge-warn';
-    $('resultBody').innerHTML = '<div class="empty-state"><strong>动画截图库中没有可靠命中</strong>' +
-      '<p>' + esc(reason) + '</p></div>' +
-      reverseSearchHtml();
-    showResults();
-    state.payload = { kind: 'trace', items: [] };
-    state.lastText = 'trace.moe 未命中';
-    return;
-  }
-
-  const best = items[0];
-  const rest = items.slice(1);
-  const low = best.similarity < TRACE_GOOD_SIM;
-  const conf = best.similarity >= TRACE_SURE_SIM
-    ? { label: '高可信', cls: 'badge-on' }
-    : best.similarity >= TRACE_GOOD_SIM
-      ? { label: '较可信', cls: 'badge-info' }
-      : { label: '存疑', cls: 'badge-warn' };
-
-  const chipsOf = (item, isBest) => {
-    const chips = [];
-    chips.push((isBest ? '最佳匹配 ' : '') + item.similarity + '% 相似');
-    if (item.episode) chips.push('第 ' + item.episode + ' 话');
-    if (item.at) chips.push('时间 ' + item.at + (item.to ? '–' + item.to : ''));
-    if (item.episodes) chips.push('全 ' + item.episodes + ' 集');
-    let html = '<div class="trace-meta">' + chips.map((c) => '<span>' + esc(c) + '</span>').join('');
-    if (traceAligned(item, meta.modelTitle)) html += '<span class="trace-hit">与模型结果一致</span>';
-    return html + '</div>';
-  };
-
-  const linksOf = (item) => {
-    const parts = [];
-    if (item.anilistId) {
-      parts.push('<a href="https://anilist.co/anime/' + encodeURIComponent(item.anilistId) + '" target="_blank" rel="noopener">AniList 条目</a>');
-    }
-    if (item.video) parts.push('<a href="' + esc(item.video) + '" target="_blank" rel="noopener">播放相似片段</a>');
-    parts.push('<a href="https://bgm.tv/subject_search/' + encodeURIComponent(item.title) + '" target="_blank" rel="noopener">Bangumi 搜索</a>');
-    return '<div class="trace-links">' + parts.join('') + '</div>';
-  };
-
-  let html = '';
-  if (low) {
-    html += '<div class="trace-warn">最佳相似度仅 ' + best.similarity + '%，低于可信参考线 ' + TRACE_GOOD_SIM + '%，画面可能被裁切、加了滤镜或并非 TV 动画，建议结合模型识别与以图搜图交叉验证。</div>';
-  }
-
-  html += '<div class="trace-hero">' +
-    (best.image ? '<div class="trace-hero-thumb"><img src="' + esc(best.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" /></div>' : '') +
-    '<div class="trace-hero-body">' +
-    '<span class="trace-kicker">trace.moe 最佳匹配 · <b class="badge ' + conf.cls + ' trace-conf">' + conf.label + '</b></span>' +
-    '<h2>' + esc(best.title) + '</h2>' +
-    (best.alt ? '<p class="trace-sub">' + esc(best.alt) + '</p>' : '') +
-    chipsOf(best, true) + linksOf(best) +
-    '</div></div>';
-
-  if (rest.length) {
-    html += '<p class="trace-more">其他候选</p><div class="trace-list">' + rest.map((item) =>
-      '<div class="trace-item">' +
-      '<div class="trace-thumb">' + (item.image ? '<img src="' + esc(item.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" />' : '') + '</div>' +
-      '<div class="trace-body"><h3>' + esc(item.title) + '</h3>' +
-      (item.alt ? '<p class="trace-sub">' + esc(item.alt) + '</p>' : '') +
-      chipsOf(item, false) + linksOf(item) +
-      '</div></div>'
-    ).join('') + '</div>';
-  }
-
-  const notes = [];
-  if (meta.cached) notes.push('命中本地缓存，12 小时内不重复消耗免费额度');
-  if (meta.fallback) notes.push('裁边模式无可靠命中，已自动改用整图重试');
-  if (meta.rejected) notes.push('已过滤 ' + meta.rejected + ' 条低可信或不适内容结果');
-  if (meta.quota) notes.push('今日免费额度已用 ' + meta.quota.used + '/' + meta.quota.limit);
-  if (notes.length) html += '<p class="trace-note">' + esc(notes.join(' · ')) + '</p>';
-  html += reverseSearchHtml();
-
-  state.payload = { kind: 'trace', items };
-  state.lastText = '【trace.moe 溯源】\n' + items.map((item) =>
-    item.title + (item.episode ? ' 第' + item.episode + '话' : '') + ' · ' + item.at +
-    ' · 相似度 ' + item.similarity + '%'
-  ).join('\n');
-  $('resultSource').textContent = 'trace.moe · 免费溯源';
-  $('resultSource').className = 'badge badge-info';
-  $('resultBody').innerHTML = html;
-  showResults();
-}
-
 function showError(title, message, retryAction) {
   $('resultSource').textContent = '识别失败';
   $('resultSource').className = 'badge badge-warn';
@@ -2417,178 +2287,6 @@ function showError(title, message, retryAction) {
 function showResults() {
   $('resultsPanel').hidden = false;
   $('resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
-
-/* ---------------- trace.moe 免费溯源 ---------------- */
-
-async function handleTrace() {
-  if (!state.dataUrl || state.busy) return;
-  const modelTitle = state.payload && state.payload.kind === 'model'
-    ? (state.payload.data.title_cn || state.payload.data.title_original || '')
-    : '';
-  const cacheKey = hashImage(state.dataUrl);
-  const cached = readTraceCache(cacheKey);
-  const cachedSafe = cached ? tracePick(cached) : null;
-  if (cachedSafe && cachedSafe.length) {
-    renderTraceResult(cachedSafe, { cached: true, modelTitle, rejected: Math.max(0, cached.length - cachedSafe.length) });
-    return;
-  }
-
-  setBusy(true, '正在动画截图中检索相似画面…');
-  $('resultsPanel').hidden = true;
-  try {
-    const blob = dataUrlToBlob(state.dataUrl);
-    let res = await traceRequest(blob, true);
-    if (res.status === 429) {
-      showError('免费额度暂时用完', 'trace.moe 每个网络每天有免费次数限制，请稍后再试，或直接使用视觉模型识别。', 'trace');
-      return;
-    }
-    if (!res.ok) {
-      showError('免费溯源失败', 'trace.moe 返回 HTTP ' + res.status + '，请稍后重试或改用视觉模型。', 'trace');
-      return;
-    }
-    let data = await res.json();
-    if (data && data.error) {
-      showError('免费溯源失败', String(data.error), 'trace');
-      return;
-    }
-
-    const all = traceItems(data);
-    let items = tracePick(all);
-    let rejected = Math.max(0, all.length - items.length);
-    let fallback = false;
-    const best = items.length ? items[0].similarity : 0;
-    // 没有可靠命中或把握不足时，改用整图再试一次
-    if (!items.length || best < TRACE_GOOD_SIM) {
-      try {
-        const retry = await traceRequest(blob, false);
-        if (retry.ok) {
-          const retryData = await retry.json();
-          if (!retryData || !retryData.error) {
-            const retryItems = tracePick(traceItems(retryData));
-            if (retryItems.length && (!items.length || retryItems[0].similarity > best)) {
-              items = retryItems;
-              fallback = true;
-              rejected = 0;
-            }
-          }
-        }
-      } catch (e) {
-        /* 重试失败不影响主结果，忽略 */
-      }
-    }
-
-    renderTraceResult(items, { cached: false, fallback, modelTitle, quota: traceQuota(data), rejected });
-    if (items.length) {
-      writeTraceCache(cacheKey, items);
-      addHistory({
-        kind: 'trace',
-        title: items[0].title,
-        subtitle: '相似度 ' + items[0].similarity + '%',
-        payload: { kind: 'trace', items }
-      });
-    }
-  } catch (err) {
-    if (err && err.name === 'AbortError') {
-      showError('免费溯源超时', 'trace.moe 响应过慢或暂时不可达，请稍后重试，或改用视觉模型识别。', 'trace');
-    } else {
-      showError('免费溯源失败', '无法访问 trace.moe。可能是网络限制或跨域拦截，可以改用视觉模型识别，或使用下方以图搜图。', 'trace');
-    }
-  } finally {
-    setBusy(false);
-  }
-}
-
-function traceRequest(blob, cutBorders) {
-  const url = 'https://api.trace.moe/search?anilistInfo' + (cutBorders ? '&cutBorders' : '');
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TRACE_TIMEOUT_MS);
-  return fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': blob.type || 'image/jpeg' },
-    body: blob,
-    signal: controller.signal
-  }).finally(() => clearTimeout(timer));
-}
-
-function traceItems(data) {
-  return ((data && data.result) || []).map((r) => {
-    const title = (r.anilist && r.anilist.title) || {};
-    const primary = title.chinese || title.native || title.romaji || title.english || r.filename || '未知作品';
-    const altParts = [title.chinese, title.native, title.romaji, title.english]
-      .filter(Boolean)
-      .filter((t) => t !== primary);
-    return {
-      title: primary,
-      alt: altParts.slice(0, 2).join(' / '),
-      similarity: Math.round((r.similarity || 0) * 100),
-      episode: r.episode != null ? r.episode : '',
-      at: formatTime(r.from),
-      to: formatTime(r.to),
-      episodes: r.anilist && r.anilist.episodes ? r.anilist.episodes : '',
-      image: r.image || '',
-      video: r.video || '',
-      anilistId: r.anilist && r.anilist.id ? r.anilist.id : '',
-      isAdult: Boolean(r.anilist && r.anilist.isAdult)
-    };
-  }).sort((a, b) => b.similarity - a.similarity);
-}
-
-/* 按可信度与内容安全过滤；同一作品同一集只保留最高相似度的一条，避免冗余 */
-function tracePick(items) {
-  const seen = new Set();
-  const out = [];
-  (items || []).forEach((it) => {
-    if (!TRACE_ALLOW_ADULT && it.isAdult) return;
-    if (it.similarity < TRACE_MIN_SIM) return;
-    const key = (it.anilistId || it.title) + '|' + (it.episode === '' ? 'mov' : it.episode);
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(it);
-  });
-  return out.slice(0, 6);
-}
-
-function traceQuota(data) {
-  if (!data) return null;
-  const limit = Number(data.quota);
-  const used = Number(data.quotaUsed);
-  if (!limit || isNaN(used)) return null;
-  return { limit, used };
-}
-
-function hashImage(dataUrl) {
-  let hash = 2166136261;
-  const step = Math.max(1, Math.floor(dataUrl.length / 4096));
-  for (let i = 0; i < dataUrl.length; i += step) {
-    hash ^= dataUrl.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36) + '_' + dataUrl.length;
-}
-
-function readTraceCache(key) {
-  try {
-    const map = JSON.parse(localStorage.getItem(TRACE_CACHE_KEY) || '{}') || {};
-    const hit = map[key];
-    if (hit && Date.now() - hit.ts < TRACE_TTL && Array.isArray(hit.items) && hit.items.length) {
-      return hit.items;
-    }
-  } catch (e) {}
-  return null;
-}
-
-function writeTraceCache(key, items) {
-  try {
-    const map = JSON.parse(localStorage.getItem(TRACE_CACHE_KEY) || '{}') || {};
-    map[key] = { ts: Date.now(), items };
-    const trimmed = {};
-    Object.keys(map)
-      .sort((a, b) => map[b].ts - map[a].ts)
-      .slice(0, 10)
-      .forEach((k) => { trimmed[k] = map[k]; });
-    localStorage.setItem(TRACE_CACHE_KEY, JSON.stringify(trimmed));
-  } catch (e) {}
 }
 
 /* ---------------- 历史记录 ---------------- */
@@ -2657,8 +2355,6 @@ function restoreHistory(index) {
   }
   if (item.payload.kind === 'model') {
     renderModelResult(item.payload.data, item.payload.model, item.payload.thinking);
-  } else if (item.payload.kind === 'trace') {
-    renderTraceResult(item.payload.items || []);
   }
 }
 
@@ -2736,7 +2432,6 @@ function bindEvents() {
   });
 
   $('btnAnalyze').addEventListener('click', handleAnalyze);
-  $('btnTrace').addEventListener('click', handleTrace);
 
   $('btnRefreshDiscover').addEventListener('click', loadDiscover);
   $('discoverTabs').addEventListener('click', (e) => {
@@ -2794,8 +2489,6 @@ function bindEvents() {
     const action = trigger.dataset.action;
     if (action === 'retry' || action === 'analyze') {
       handleAnalyze();
-    } else if (action === 'trace') {
-      handleTrace();
     } else if (action === 'online-retry' && state.payload && state.payload.data) {
       enhanceOnline(state.payload.data);
     }

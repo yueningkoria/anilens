@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AniLens · 动漫截图溯源</title>
   <meta name="description" content="上传动漫截图、游戏 CG 或插画，识别出自哪部番剧、游戏或作品，支持接入自己的视觉大模型 API。" />
-  <meta name="keywords" content="动漫截图,出处识别,以图搜番,galgame,AniList,trace.moe,VNDB" />
+  <meta name="keywords" content="动漫截图,出处识别,以图搜番,galgame,AniList,VNDB" />
   <meta name="theme-color" content="#07080d" />
   <meta name="color-scheme" content="dark" />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
@@ -47,7 +47,7 @@
       <div class="flow">
         <span><b>1</b> 上传截图</span>
         <i>→</i>
-        <span><b>2</b> 配置模型 / 免费溯源</span>
+        <span><b>2</b> 配置视觉模型</span>
         <i>→</i>
         <span><b>3</b> 出处 + 相似角色推荐</span>
       </div>
@@ -92,9 +92,8 @@
 
       <div class="action-row">
         <button class="btn btn-primary" id="btnAnalyze" type="button" disabled>用我的模型识别</button>
-        <button class="btn btn-secondary" id="btnTrace" type="button" disabled>免费动画溯源</button>
       </div>
-      <p class="hint">免费溯源基于 trace.moe，只覆盖电视动画截图，并会自动过滤相似度不足 75% 的假结果；游戏、漫画、插画请用视觉模型识别。 <a class="demo-link" href="?demo=1">没有 Key？先看示例结果 →</a></p>
+      <p class="hint">识别基于你配置的视觉模型，支持番剧、游戏、漫画与插画；识别后会自动联网补充作品档案与相似角色。 <a class="demo-link" href="?demo=1">没有 Key？先看示例结果 →</a></p>
     </section>
 
     <section class="panel" id="discoverPanel">
@@ -140,7 +139,6 @@
           <a href="https://iqdb.org/" target="_blank" rel="noopener">IQDB</a>
           <a href="https://lens.google.com/" target="_blank" rel="noopener">Google Lens</a>
           <a href="https://yandex.com/images/" target="_blank" rel="noopener">Yandex 图片</a>
-          <a href="https://trace.moe/" target="_blank" rel="noopener">trace.moe</a>
         </div>
       </div>
     </section>
