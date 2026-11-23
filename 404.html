@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>页面走丢了 · AniLens</title>
+  <meta name="robots" content="noindex" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: radial-gradient(circle at 30% 0%, rgba(139, 92, 246, 0.22), transparent 55%),
+                  radial-gradient(circle at 80% 20%, rgba(255, 77, 141, 0.18), transparent 50%),
+                  #07080d;
+      color: #eef1f8;
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      text-align: center;
+    }
+    .card {
+      max-width: 460px;
+      padding: 40px 32px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      background: rgba(18, 22, 33, 0.72);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+    }
+    .code {
+      font-size: 56px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      background: linear-gradient(120deg, #fff 10%, #ffd0e0 55%, #b9a6ff 95%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    h1 { margin: 8px 0 12px; font-size: 20px; }
+    p { margin: 0 0 24px; font-size: 13.5px; line-height: 1.7; color: #929ab2; }
+    a {
+      display: inline-block;
+      padding: 11px 22px;
+      border-radius: 11px;
+      font-size: 13.5px;
+      font-weight: 600;
+      color: #fff;
+      text-decoration: none;
+      background: linear-gradient(135deg, #ff4d8d, #8b5cf6);
+      box-shadow: 0 8px 24px rgba(255, 77, 141, 0.3);
+    }
+    a:hover { filter: brightness(1.07); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="code">404</div>
+    <h1>这个页面不存在</h1>
+    <p>你访问的地址可能已失效或输入有误。回到首页继续用截图找番剧吧。</p>
+    <a href="./">返回首页</a>
+  </main>
+</body>
+</html>
