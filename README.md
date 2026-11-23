@@ -1,4 +1,5 @@
 # AniLens · 动漫截图溯源
+快捷链接：https://yueningkoria.github.io/anilens/
 
 上传一张番剧截图、游戏 CG 或插画，识别它出自哪部作品、哪一话、哪个角色。
 
