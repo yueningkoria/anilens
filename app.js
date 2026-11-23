@@ -1006,7 +1006,8 @@ function reverseSearchLinks() {
       { label: 'IQDB', href: 'https://iqdb.org/?url=' + q },
       { label: 'ascii2d 色合', href: 'https://ascii2d.net/search/url/' + q },
       { label: 'ascii2d 特征', href: 'https://ascii2d.net/search/url/' + q },
-      { label: 'Google Lens', href: 'https://lens.google.com/uploadbyurl?url=' + q }
+      { label: 'Google Lens', href: 'https://lens.google.com/uploadbyurl?url=' + q },
+      { label: 'Yandex 图片', href: 'https://yandex.com/images/search?rpt=imageview&url=' + q }
     ];
   }
   return [
@@ -1014,7 +1015,8 @@ function reverseSearchLinks() {
     { label: 'IQDB', href: 'https://iqdb.org/' },
     { label: 'ascii2d 色合', href: 'https://ascii2d.net/' },
     { label: 'ascii2d 特征', href: 'https://ascii2d.net/' },
-    { label: 'Google Lens', href: 'https://lens.google.com/' }
+    { label: 'Google Lens', href: 'https://lens.google.com/' },
+    { label: 'Yandex 图片', href: 'https://yandex.com/images/' }
   ];
 }
 
@@ -2368,6 +2370,17 @@ function imageInformativeness(dataUrl) {
   });
 }
 
+/* 供兜底区块下载当前图片，便于在 ascii2d / Yandex 站内手动上传 */
+function downloadImage() {
+  if (!state.dataUrl) return;
+  const a = document.createElement('a');
+  a.href = state.dataUrl;
+  a.download = 'anilens-scene.png';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 function hashImage(dataUrl) {
   let hash = 2166136261;
   const step = Math.max(1, Math.floor(dataUrl.length / 4096));
@@ -2732,6 +2745,20 @@ function renderFreeResult(payload) {
 
   if (!trace.length && !sauce.length) {
     html += '<div class="empty-state"><strong>没有可靠命中</strong><p>' + esc(cross.text) + '</p></div>';
+  }
+
+  if (cross.level === 'none' || cross.level === 'low') {
+    const q = state.imageUrl ? encodeURIComponent(state.imageUrl) : '';
+    const asciiHref = q ? 'https://ascii2d.net/search/url/' + q : 'https://ascii2d.net/';
+    const yandexHref = q ? 'https://yandex.com/images/search?rpt=imageview&url=' + q : 'https://yandex.com/images/';
+    html += '<div class="fallback-box"><p class="block-label">兜底检索</p>' +
+      '<p class="fallback-note">自动来源没有可靠命中，可按顺序继续人工确认：先 ascii2d，再用 Yandex 兜底。' +
+      (state.imageUrl ? '' : ' 上传的图片无法直接传给第三方，请先下载，再到站点内拖入。') + '</p>' +
+      '<div class="search-row">' +
+      '<a href="' + esc(asciiHref) + '" target="_blank" rel="noopener">① ascii2d 检索</a>' +
+      '<a href="' + esc(yandexHref) + '" target="_blank" rel="noopener">② Yandex 图片兜底</a>' +
+      (state.imageUrl ? '' : '<button class="btn btn-sm btn-ghost" type="button" onclick="downloadImage()">下载图片</button>') +
+      '</div></div>';
   }
 
   const notes = [];
