@@ -144,6 +144,24 @@
       </div>
     </section>
 
+    <section class="panel" id="libraryPanel" hidden>
+      <div class="panel-head">
+        <h2>共享图库 · 云端比对</h2>
+        <div class="head-right">
+          <span class="badge badge-off" id="libBadge">未连接</span>
+          <button class="btn btn-sm btn-ghost" id="btnLibRefresh" type="button">刷新</button>
+        </div>
+      </div>
+      <p class="hint lib-hint">把截图存入云端共享图库，所有人都能用图片做相似度比对；图片会上传到 Supabase 云端，请勿上传隐私内容。</p>
+      <div class="action-row lib-actions">
+        <button class="btn btn-primary" id="btnLibUpload" type="button" disabled>存入共享图库</button>
+        <button class="btn btn-secondary" id="btnLibCompare" type="button" disabled>用当前图片云端比对</button>
+      </div>
+      <div id="libCompareResult"></div>
+      <div class="lib-grid" id="libGrid"></div>
+      <p class="discover-note" id="libNote">图库数据来自云端，按上传时间倒序排列。</p>
+    </section>
+
     <section class="panel" id="historyPanel" hidden>
       <div class="panel-head">
         <h2>最近识别</h2>
@@ -201,6 +219,39 @@
         <button class="btn btn-primary" id="btnSaveSettings" type="button">保存设置</button>
       </div>
       <p class="modal-note" id="testResult"></p>
+    </div>
+  </div>
+
+  <div class="modal" id="libModal" hidden>
+    <div class="modal-mask" data-close="1"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="libModalTitle">
+      <div class="modal-head">
+        <h2 id="libModalTitle">存入共享图库</h2>
+        <button class="icon-btn" id="btnCloseLib" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="modal-sub">图片会压缩后上传到云端，所有访客都能看到并用于相似度比对。</p>
+      <label class="field">
+        <span>作品 / 角色 <em>必填</em></span>
+        <input id="libTitle" type="text" maxlength="80" placeholder="例如：进击的巨人 · 三笠" />
+      </label>
+      <label class="field">
+        <span>标签 <em>用逗号分隔，可选</em></span>
+        <input id="libTags" type="text" maxlength="80" placeholder="番剧, 2013, WIT STUDIO" />
+      </label>
+      <label class="field">
+        <span>类型</span>
+        <select id="libKind">
+          <option value="anime">番剧动画</option>
+          <option value="game">游戏 / Galgame</option>
+          <option value="illustration">插画 / 同人</option>
+          <option value="other">其他</option>
+        </select>
+      </label>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" id="btnLibCancel" type="button">取消</button>
+        <button class="btn btn-primary" id="btnLibSubmit" type="button">上传</button>
+      </div>
+      <p class="modal-note" id="libUploadNote"></p>
     </div>
   </div>
 

@@ -7,6 +7,16 @@ const PROMPT_KEY = 'anilens.prompt.v1';
 const HINT_KEY = 'anilens.hint.v1';
 const MAX_HISTORY = 6;
 
+/* 共享图库（Supabase）：填入 Project URL 与 anon key 后自动启用，缺少任一项则隐藏图库面板 */
+const LIB_CONFIG = {
+  url: '',
+  key: '',
+  bucket: 'library-thumbs',
+  table: 'library'
+};
+
+const LIB_KIND_LABEL = { anime: '番剧', game: '游戏', illustration: '插画', other: '其他' };
+
 const PRESETS = {
   siliconflow: {
     label: '硅基流动 SiliconFlow',
@@ -2733,6 +2743,317 @@ async function handleFree() {
   }
 }
 
+/* ---------------- 共享图库 · 云端比对 ---------------- */
+
+const libState = { items: [], ready: false, loading: false, error: '', compare: null };
+
+function libReady() {
+  return Boolean(LIB_CONFIG.url && LIB_CONFIG.key);
+}
+
+function libEndpoint(path) {
+  return String(LIB_CONFIG.url).replace(/\/+$/, '') + path;
+}
+
+function libHeaders(extra) {
+  return Object.assign({
+    apikey: LIB_CONFIG.key,
+    Authorization: 'Bearer ' + LIB_CONFIG.key
+  }, extra || {});
+}
+
+async function libErrorText(res) {
+  try {
+    const text = await res.text();
+    try {
+      const data = JSON.parse(text);
+      return (data && (data.message || data.error_description || data.hint)) || text;
+    } catch (e) {
+      return text || ('HTTP ' + res.status);
+    }
+  } catch (e) {
+    return 'HTTP ' + res.status;
+  }
+}
+
+function libThumbUrl(path) {
+  if (!path) return '';
+  return libEndpoint('/storage/v1/object/public/' + LIB_CONFIG.bucket + '/' + path);
+}
+
+/* 感知哈希：缩到 9×8 灰度，比较相邻像素亮度，得到 64 位指纹 */
+function dHashFromDataUrl(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = 9;
+        const h = 8;
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let bits = '';
+        for (let y = 0; y < h; y += 1) {
+          for (let x = 0; x < w - 1; x += 1) {
+            const i = (y * w + x) * 4;
+            const j = i + 4;
+            const l1 = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            const l2 = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+            bits += l1 > l2 ? '1' : '0';
+          }
+        }
+        let hex = '';
+        for (let i = 0; i < 64; i += 4) hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+        resolve(hex);
+      } catch (e) {
+        resolve('');
+      }
+    };
+    img.onerror = () => resolve('');
+    img.src = dataUrl;
+  });
+}
+
+function hashSimilarity(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dist = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = (parseInt(a[i], 16) ^ parseInt(b[i], 16)) & 15;
+    dist += (x & 1) + ((x >> 1) & 1) + ((x >> 2) & 1) + ((x >> 3) & 1);
+  }
+  return Math.max(0, 1 - dist / 64);
+}
+
+function makeThumbBlob(dataUrl, maxSide, quality) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0b0d12';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error('图片压缩失败'));
+      }, 'image/jpeg', quality);
+    };
+    img.onerror = () => reject(new Error('图片解码失败'));
+    img.src = dataUrl;
+  });
+}
+
+function renderLibrary() {
+  const panel = $('libraryPanel');
+  panel.hidden = !libReady();
+  if (!libReady()) return;
+
+  const badge = $('libBadge');
+  if (libState.loading) {
+    badge.textContent = '连接中…';
+    badge.className = 'badge badge-info';
+  } else if (libState.error) {
+    badge.textContent = '连接失败';
+    badge.className = 'badge badge-warn';
+  } else {
+    badge.textContent = '云端 · ' + libState.items.length + ' 张';
+    badge.className = 'badge badge-on';
+  }
+
+  $('btnLibUpload').disabled = !libState.ready;
+  $('btnLibCompare').disabled = !libState.ready;
+
+  const grid = $('libGrid');
+  if (!libState.items.length) {
+    grid.innerHTML = '<div class="lib-empty">' +
+      (libState.error ? '图库连接失败：' + esc(libState.error) : '图库还没有内容，上传第一张截图吧。') +
+      '</div>';
+    return;
+  }
+  const list = libState.compare || libState.items.map((item) => ({ item, sim: null }));
+  grid.innerHTML = list.slice(0, 60).map((entry) => {
+    const item = entry.item;
+    const sim = entry.sim;
+    const tags = (item.tags || []).slice(0, 3).map((t) => '#' + t).join(' ');
+    const simCls = sim == null ? '' : sim >= 0.85 ? ' hot' : sim >= 0.7 ? ' warm' : '';
+    const simHtml = sim == null ? '' : '<span class="lib-sim' + simCls + '">' + Math.round(sim * 100) + '%</span>';
+    const thumb = libThumbUrl(item.thumb_path);
+    return '<a class="lib-card" href="' + esc(thumb) + '" target="_blank" rel="noopener">' +
+      '<div class="lib-thumb"><img src="' + esc(thumb) + '" alt="" loading="lazy" referrerpolicy="no-referrer" />' + simHtml + '</div>' +
+      '<strong title="' + esc(item.title) + '">' + esc(item.title) + '</strong>' +
+      '<span>' + esc(LIB_KIND_LABEL[item.kind] || '其他') + (tags ? ' · ' + esc(tags) : '') + '</span></a>';
+  }).join('');
+}
+
+async function loadLibrary() {
+  if (!libReady()) {
+    renderLibrary();
+    return;
+  }
+  if (libState.loading) return;
+  libState.loading = true;
+  libState.error = '';
+  renderLibrary();
+  try {
+    const res = await fetch(libEndpoint('/rest/v1/' + LIB_CONFIG.table +
+      '?select=id,title,tags,kind,hash,thumb_path,created_at&order=created_at.desc&limit=120'), {
+      headers: libHeaders()
+    });
+    if (!res.ok) throw new Error(await libErrorText(res));
+    const list = await res.json();
+    libState.items = Array.isArray(list) ? list : [];
+    libState.compare = null;
+    libState.ready = true;
+  } catch (err) {
+    libState.ready = false;
+    libState.error = (err && err.message) || '连接失败';
+  } finally {
+    libState.loading = false;
+    renderLibrary();
+  }
+}
+
+async function handleLibCompare() {
+  if (!state.dataUrl) {
+    toast('请先上传或载入一张图片');
+    return;
+  }
+  if (!libReady()) {
+    toast('共享图库尚未启用');
+    return;
+  }
+  if (!libState.ready) await loadLibrary();
+  if (!libState.ready) {
+    toast('图库连接失败，请稍后重试');
+    return;
+  }
+  $('btnLibCompare').disabled = true;
+  try {
+    const hash = await dHashFromDataUrl(state.dataUrl);
+    if (!hash) {
+      toast('图片解析失败，请换一张试试');
+      return;
+    }
+    if (!libState.items.length) {
+      libState.compare = null;
+      $('libCompareResult').innerHTML = '<div class="lib-compare-box"><b>云端比对</b>' +
+        '<p>图库还没有内容，先「存入共享图库」吧。</p></div>';
+      renderLibrary();
+      return;
+    }
+    const scored = libState.items
+      .map((item) => ({ item, sim: hashSimilarity(hash, item.hash) }))
+      .sort((a, b) => b.sim - a.sim);
+    libState.compare = scored;
+    const best = scored[0];
+    const strong = scored.filter((s) => s.sim >= 0.8).length;
+    const pct = Math.round(best.sim * 100);
+    const hit = best.sim >= 0.7;
+    $('libCompareResult').innerHTML = '<div class="lib-compare-box"><b>' +
+      (hit ? '云端比对：最相似 ' + pct + '%' : '云端比对：未找到明显相似项（最高 ' + pct + '%）') + '</b>' +
+      '<p>' + (hit
+        ? esc(best.item.title) + (strong > 1 ? '，另有 ' + (strong - 1) + ' 张高度相近' : '') + '。'
+        : '图库中没有构图接近的图片，可以换一张截图，或先存入更多素材。') +
+      ' 比对基于感知哈希，只看画面结构，不理解内容。</p></div>';
+    renderLibrary();
+    $('libraryPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } finally {
+    $('btnLibCompare').disabled = !libState.ready;
+  }
+}
+
+function openLibModal() {
+  if (!state.dataUrl) {
+    toast('请先上传或载入一张图片');
+    return;
+  }
+  if (!libReady()) {
+    toast('共享图库尚未启用');
+    return;
+  }
+  const payload = state.payload || {};
+  const guess = payload.kind === 'model'
+    ? (payload.data && (payload.data.title_cn || payload.data.title_original)) || ''
+    : payload.kind === 'free' && payload.trace && payload.trace[0] ? payload.trace[0].title : '';
+  $('libTitle').value = guess;
+  $('libTags').value = '';
+  $('libKind').value = 'anime';
+  $('libUploadNote').textContent = '';
+  $('libUploadNote').className = 'modal-note';
+  $('btnLibSubmit').disabled = false;
+  $('libModal').hidden = false;
+  setTimeout(() => $('libTitle').focus(), 50);
+}
+
+function closeLibModal() {
+  $('libModal').hidden = true;
+}
+
+function parseLibTags(text) {
+  return String(text || '').split(/[,，、\s]+/).map((t) => t.trim()).filter(Boolean).slice(0, 6);
+}
+
+async function submitLibUpload() {
+  const title = $('libTitle').value.trim();
+  const note = $('libUploadNote');
+  if (!title) {
+    note.textContent = '请填写作品或角色名';
+    note.className = 'modal-note err';
+    return;
+  }
+  if (!libReady()) {
+    note.textContent = '共享图库尚未启用';
+    note.className = 'modal-note err';
+    return;
+  }
+  const btn = $('btnLibSubmit');
+  btn.disabled = true;
+  note.textContent = '正在压缩图片…';
+  note.className = 'modal-note';
+  try {
+    const hash = await dHashFromDataUrl(state.dataUrl);
+    if (!hash) throw new Error('图片解析失败');
+    const blob = await makeThumbBlob(state.dataUrl, 720, 0.72);
+    const path = 'u_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8) + '.jpg';
+    note.textContent = '正在上传到云端…';
+    const up = await fetch(libEndpoint('/storage/v1/object/' + LIB_CONFIG.bucket + '/' + path), {
+      method: 'POST',
+      headers: libHeaders({ 'Content-Type': 'image/jpeg' }),
+      body: blob
+    });
+    if (!up.ok) throw new Error(await libErrorText(up));
+    const ins = await fetch(libEndpoint('/rest/v1/' + LIB_CONFIG.table), {
+      method: 'POST',
+      headers: libHeaders({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }),
+      body: JSON.stringify({
+        title: title.slice(0, 80),
+        tags: parseLibTags($('libTags').value),
+        kind: $('libKind').value,
+        hash,
+        thumb_path: path
+      })
+    });
+    if (!ins.ok) throw new Error(await libErrorText(ins));
+    closeLibModal();
+    toast('已存入共享图库');
+    libState.compare = null;
+    $('libCompareResult').innerHTML = '';
+    await loadLibrary();
+    $('libraryPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (err) {
+    note.textContent = '上传失败：' + ((err && err.message) || '未知错误');
+    note.className = 'modal-note err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* ---------------- 历史记录 ---------------- */
 
 function readHistory() {
@@ -2924,6 +3245,7 @@ function bindEvents() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('settingsModal').hidden) closeSettings();
+    if (e.key === 'Escape' && !$('libModal').hidden) closeLibModal();
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
       if (state.dataUrl && !state.busy) handleAnalyze();
@@ -2962,6 +3284,16 @@ function bindEvents() {
     writeHistory([]);
     renderHistory();
     toast('历史记录已清空');
+  });
+
+  $('btnLibRefresh').addEventListener('click', loadLibrary);
+  $('btnLibUpload').addEventListener('click', openLibModal);
+  $('btnLibCompare').addEventListener('click', handleLibCompare);
+  $('btnCloseLib').addEventListener('click', closeLibModal);
+  $('btnLibCancel').addEventListener('click', closeLibModal);
+  $('btnLibSubmit').addEventListener('click', submitLibUpload);
+  $('libModal').addEventListener('click', (e) => {
+    if (e.target.dataset && e.target.dataset.close) closeLibModal();
   });
 }
 
@@ -3357,6 +3689,8 @@ function init() {
   refreshBadge();
   renderPreview();
   renderHistory();
+  renderLibrary();
+  loadLibrary();
   loadDiscover();
   startNetClock();
   startDiscoverAutoRefresh();
